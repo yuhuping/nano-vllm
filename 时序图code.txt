@@ -1,0 +1,151 @@
+sequenceDiagram
+    autonumber
+    participant User as User / example.py
+    participant LLM as LLM Engine
+    participant Tok as AutoTokenizer
+    participant Sch as Scheduler
+    participant BM as BlockManager
+    participant MR as ModelRunner
+    participant Model as Qwen3ForCausalLM
+    participant Attn as Attention / KV Cache
+    participant Samp as Sampler
+
+    rect rgb(245, 245, 255)
+        User->>LLM: generate(prompts, sampling_params)
+
+        loop For each prompt
+            LLM->>LLM: add_request(prompt, sampling_params)
+            alt Prompt is string
+                LLM->>Tok: encode(prompt)
+                Tok-->>LLM: token_ids
+            end
+            LLM->>LLM: create Sequence(token_ids, sampling_params)
+            LLM->>Sch: add(seq)
+            Sch->>Sch: waiting.append(seq)
+        end
+    end
+
+    rect rgb(245, 255, 245)
+        loop While scheduler is not finished
+            LLM->>Sch: schedule()
+
+            alt Schedulable waiting sequence exists (prefill)
+                Sch->>Sch: pick seq from waiting
+                Sch->>BM: can_allocate(seq)
+                BM-->>Sch: num_cached_blocks or -1
+
+                alt KV blocks available
+                    Sch->>BM: allocate(seq, num_cached_blocks)
+                    BM->>BM: fill seq.block_table
+                    BM->>BM: set seq.num_cached_tokens
+                    Sch->>Sch: set seq.num_scheduled_tokens
+
+                    alt Prompt prefill complete
+                        Sch->>Sch: seq.status = RUNNING
+                        Sch->>Sch: waiting.popleft()
+                        Sch->>Sch: running.append(seq)
+                    else Chunked prefill incomplete
+                        Sch->>Sch: keep seq in waiting
+                    end
+
+                    Sch-->>LLM: scheduled_seqs, is_prefill = true
+                else KV blocks unavailable
+                    Sch->>Sch: stop scheduling prefill
+                end
+
+            else No prefill candidate (decode)
+                Sch->>Sch: seq = running.popleft()
+                Sch->>BM: can_append(seq)
+
+                alt No free KV block
+                    alt Another running seq exists
+                        Sch->>Sch: victim = running.pop()
+                        Sch->>Sch: preempt(victim)
+                        Sch->>BM: deallocate(victim)
+                        Sch->>Sch: waiting.appendleft(victim)
+                    else Only current seq exists
+                        Sch->>Sch: preempt(seq)
+                        Sch->>BM: deallocate(seq)
+                        Sch->>Sch: waiting.appendleft(seq)
+                    end
+                else Can append
+                    Sch->>Sch: seq.num_scheduled_tokens = 1
+                    Sch->>Sch: seq.is_prefill = false
+                    Sch->>BM: may_append(seq)
+                    BM->>BM: allocate new block if needed
+                    Sch->>Sch: scheduled_seqs.append(seq)
+                end
+
+                Sch->>Sch: running.extendleft(scheduled_seqs)
+                Sch-->>LLM: scheduled_seqs, is_prefill = false
+            end
+    end
+
+    rect rgb(255, 250, 240)
+            LLM->>MR: run(scheduled_seqs, is_prefill)
+
+            alt Prefill execution
+                MR->>MR: prepare_prefill(seqs)
+                MR->>MR: build input_ids and positions
+                MR->>MR: build cu_seqlens_q and cu_seqlens_k
+                MR->>MR: build slot_mapping
+                MR->>MR: set_context(is_prefill = true)
+            else Decode execution
+                MR->>MR: prepare_decode(seqs)
+                MR->>MR: input_ids = seq.last_token
+                MR->>MR: positions = len(seq) - 1
+                MR->>MR: build context_lens and block_tables
+                MR->>MR: set_context(is_prefill = false)
+            end
+
+            MR->>Model: model(input_ids, positions)
+
+            loop For each decoder layer
+                Model->>Attn: forward(q, k, v)
+                Attn->>Attn: store_kvcache(k, v, slot_mapping)
+
+                alt Prefill attention
+                    Attn->>Attn: flash_attn_varlen_func(...)
+                else Decode attention
+                    Attn->>Attn: flash_attn_with_kvcache(...)
+                end
+
+                Attn-->>Model: hidden_states
+            end
+
+            Model-->>MR: hidden_states
+            MR->>Model: compute_logits(hidden_states)
+            Model-->>MR: logits
+            MR->>Samp: sample(logits, temperatures)
+            Samp-->>MR: token_ids
+            MR->>MR: reset_context()
+            MR-->>LLM: token_ids
+    end
+
+    rect rgb(255, 245, 245)
+            LLM->>Sch: postprocess(seqs, token_ids, is_prefill)
+            Sch->>BM: hash_blocks(seqs)
+            BM->>BM: register completed full blocks as prefix cache
+            Sch->>Sch: update num_cached_tokens for seqs
+            Sch->>Sch: reset num_scheduled_tokens for seqs
+
+            alt Chunked prefill incomplete
+                Sch->>Sch: continue without appending sampled token
+            else Normal prefill or decode
+                Sch->>Sch: append sampled token to each seq
+
+                alt EOS reached or max_tokens reached
+                    Sch->>Sch: mark seq as FINISHED
+                    Sch->>BM: deallocate(seq)
+                    Sch->>Sch: remove seq from running
+                end
+            end
+
+            Sch-->>LLM: postprocess complete
+            LLM->>LLM: collect finished outputs
+        end
+    end
+
+    LLM->>Tok: decode(completion_token_ids)
+    Tok-->>LLM: text
+    LLM-->>User: return [{"text": text, "token_ids": ids}]

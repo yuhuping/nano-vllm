@@ -5,19 +5,19 @@ import numpy as np
 from nanovllm.engine.sequence import Sequence
 
 
-class Block:
+class Block:    # 物理 KV cache block 的元信息
 
     def __init__(self, block_id):
-        self.block_id = block_id
-        self.ref_count = 0
-        self.hash = -1
+        self.block_id = block_id    # 物理KV block 编号
+        self.ref_count = 0          # 有多少逻辑KV block在使用这个物理KV block
+        self.hash = -1              # prefix hash 记录prompt前缀
         self.token_ids = []
 
     def update(self, hash: int, token_ids: list[int]):
         self.hash = hash
         self.token_ids = token_ids
 
-    def reset(self):
+    def reset(self):    # 将这个物理 KV block 重置
         self.ref_count = 1
         self.hash = -1
         self.token_ids = []
@@ -35,7 +35,7 @@ class BlockManager:
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
         h = xxhash.xxh64()
-        if prefix != -1:
+        if prefix != -1:    # 链式hash
             h.update(prefix.to_bytes(8, "little"))
         h.update(np.array(token_ids).tobytes())
         return h.intdigest()
@@ -66,12 +66,13 @@ class BlockManager:
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 break
             num_cached_blocks += 1
-            if block_id in self.used_block_ids:
+            if block_id in self.used_block_ids: # 说明别的 running sequence 正在占用
                 num_new_blocks -= 1
         if len(self.free_block_ids) < num_new_blocks:
             return -1
         return num_cached_blocks
 
+    # 由scheduler 确认 can_allocate()后调用
     def allocate(self, seq: Sequence, num_cached_blocks: int):
         assert not seq.block_table
         h = -1
