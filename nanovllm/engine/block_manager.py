@@ -56,6 +56,11 @@ class BlockManager:
         self.free_block_ids.append(block_id)
 
     def can_allocate(self, seq: Sequence) -> int:
+        """
+        output:
+            -1：当前 free block 不够，不能调度这条 sequence。
+            >=0：命中了多少个 prefix cache block。
+        """
         h = -1
         num_cached_blocks = 0
         num_new_blocks = seq.num_blocks

@@ -10,6 +10,7 @@ from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.utils.logging import Logger
 
 
 class LLMEngine:
@@ -32,6 +33,7 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
+        self.logger = Logger(config.log_file) if config.log_file else None
         atexit.register(self.exit)
 
     def exit(self):
@@ -45,13 +47,19 @@ class LLMEngine:
             prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
+        if self.logger is not None:
+            self.logger.add_request(seq)
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
+        if self.logger is not None:
+            self.logger.before_step(self.scheduler.waiting, self.scheduler.running, seqs, is_prefill)
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        if self.logger is not None:
+            self.logger.after_step(seqs)
         return outputs, num_tokens
 
     def is_finished(self):
