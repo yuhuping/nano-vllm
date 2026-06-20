@@ -43,6 +43,42 @@ outputs = llm.generate(prompts, sampling_params)
 outputs[0]["text"]
 ```
 
+## Simplified OpenAI API Server
+
+This repo also includes a minimal OpenAI-compatible HTTP server for local experiments:
+
+```bash
+python openai_server.py \
+  --model ~/Qwen3-0.6B \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --enforce-eager
+```
+
+Supported endpoints:
+
+```text
+POST /v1/completions
+POST /v1/chat/completions
+GET  /v1/models
+GET  /health
+```
+
+The server accepts core fields such as `model`, `prompt`, `messages`, `max_tokens`, `temperature`, and `stream`.
+
+Streaming responses use server-sent events:
+
+```bash
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen3-0.6B",
+    "stream": true,
+    "messages": [{"role": "user", "content": "Say hi."}],
+    "max_tokens": 16
+  }'
+```
+
 ## Benchmark
 
 See `bench.py` for benchmark.

@@ -49,6 +49,27 @@ class LLMEngine:
         self.scheduler.add(seq)
         if self.logger is not None:
             self.logger.add_request(seq)
+        return seq
+
+    def generate_stream(self, prompt: str | list[int], sampling_params: SamplingParams):
+        seq = self.add_request(prompt, sampling_params)
+        emitted_text = ""
+        while not seq.is_finished:
+            self.step()
+            text = self.tokenizer.decode(seq.completion_token_ids)
+            if len(text) > len(emitted_text):
+                delta = text[len(emitted_text):]
+                emitted_text = text
+                yield {
+                    "text": delta,
+                    "token_ids": seq.completion_token_ids,
+                    "finished": False,
+                }
+        yield {
+            "text": "",
+            "token_ids": seq.completion_token_ids,
+            "finished": True,
+        }
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
