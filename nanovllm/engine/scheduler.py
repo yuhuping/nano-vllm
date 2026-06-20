@@ -22,11 +22,16 @@ class Scheduler:
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
+    def _sjf_key(self, seq: Sequence):
+        return seq.num_prompt_tokens + seq.max_tokens
+
     def schedule(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
 
         # prefill
+        if len(self.waiting) > 1:
+            self.waiting = deque(sorted(self.waiting, key=self._sjf_key))
         while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
             seq = self.waiting[0]
             remaining = self.max_num_batched_tokens - num_batched_tokens
